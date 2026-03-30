@@ -1,0 +1,210 @@
+"""
+📊 Stock Market Dashboard — Monitor Any Stock, ETF, or Index
+Data via yFinance
+"""
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+from datetime import datetime
+
+# ─────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="Stock Market Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ─────────────────────────────────────────────
+# CUSTOM CSS
+# ─────────────────────────────────────────────
+st.markdown("""
+<style>
+    .stMetric { background: rgba(255,255,255,0.05); border-radius: 8px; padding: 8px; }
+    .block-container { padding-top: 1rem; }
+    div[data-testid="stDataFrame"] { border-radius: 8px; }
+    .signal-buy    { color: #00c851; font-weight: bold; }
+    .signal-accum  { color: #ffbb33; font-weight: bold; }
+    .signal-watch  { color: #ff8800; font-weight: bold; }
+    .signal-wait   { color: #ff4444; font-weight: bold; }
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# USER INPUT
+# ─────────────────────────────────────────────
+st.title("📊 Stock Market Dashboard")
+st.markdown("Monitor any stock, ETF, or index with live data and technical analysis.")
+
+# Search bar for ticker input
+ticker = st.text_input("Enter a stock ticker (e.g., AAPL, ^GSPC, EWLD):", "AAPL").strip().upper()
+
+# Period selection
+period_label = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y"], index=3)
+period = period_label
+
+# Load data
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_data(ticker: str, period: str) -> pd.DataFrame:
+    try:
+        df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
+        df.index = df.index.tz_localize(None)
+        return df
+    except Exception:
+        st.error(f"Could not load data for {ticker}. Please check the ticker.")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_info(ticker: str) -> dict:
+    try:
+        return yf.Ticker(ticker).info
+    except Exception:
+        return {}
+
+# Load data
+hist = load_data(ticker, period)
+info = load_info(ticker)
+
+if hist.empty:
+    st.warning(f"No data available for {ticker}.")
+else:
+    # ─────────────────────────────────────────────
+    # TECHNICAL INDICATORS
+    # ─────────────────────────────────────────────
+    def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+        delta = series.diff()
+        gain = delta.clip(lower=0).rolling(period).mean()
+        loss = (-delta.clip(upper=0)).rolling(period).mean()
+        rs = gain / loss.replace(0, np.nan)
+        return 100 - (100 / (1 + rs))
+
+    def macd(series: pd.Series, fast=12, slow=26, sig=9):
+        m = series.ewm(span=fast, adjust=False).mean() - series.ewm(span=slow, adjust=False).mean()
+        s = m.ewm(span=sig, adjust=False).mean()
+        return m, s, m - s
+
+    def bollinger(series: pd.Series, period=20, k=2):
+        sma = series.rolling(period).mean()
+        std = series.rolling(period).std()
+        return sma + k * std, sma, sma - k * std
+
+    close = hist["Close"]
+    rsi_s = rsi(close)
+    ma20 = close.rolling(20).mean()
+    ma50 = close.rolling(50).mean()
+    ma200 = close.rolling(200).mean()
+    bb_u, bb_m, bb_l = bollinger(close)
+    macd_l, macd_sig, _ = macd(close)
+
+    # ─────────────────────────────────────────────
+    # DASHBOARD TABS
+    # ─────────────────────────────────────────────
+    tab_overview, tab_tech, tab_signals, tab_compare = st.tabs([
+        "🏠 Overview", "📈 Technical Analysis", "🎯 Entry Signals", "🔄 Performance"
+    ])
+
+    with tab_overview:
+        # KPIs
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Price", f"{close.iloc[-1]:.2f}")
+        k2.metric("YTD", f"{(close.iloc[-1]/close.iloc[0]-1)*100:.1f}%")
+        k3.metric("1Y", f"{(close.iloc[-1]/close.iloc[-252]-1)*100:.1f}%" if len(close) >= 252 else "N/A")
+        k4.metric("RSI", f"{rsi_s.iloc[-1]:.1f}")
+
+        # Price Chart
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=hist.index, y=close, name="Price", line=dict(color="#26a69a")))
+        for ma_s, color, label in [(ma20, "#FFA726", "MA20"), (ma50, "#42A5F5", "MA50"), (ma200, "#EF5350", "MA200")]:
+            fig.add_trace(go.Scatter(x=hist.index, y=ma_s, name=label, line=dict(color=color)))
+        fig.update_layout(title=f"{ticker} — {period_label}", height=400, xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Fundamentals
+        st.markdown("### 📊 Fundamentals")
+        pe = info.get("trailingPE")
+        dividend_yield = info.get("dividendYield")
+        beta = info.get("beta")
+        market_cap = info.get("marketCap")
+        st.write(f"**P/E:** {pe:.1f}" if pe else "**P/E:** N/A")
+        st.write(f"**Dividend Yield:** {dividend_yield*100:.2f}%" if dividend_yield else "**Dividend Yield:** N/A")
+        st.write(f"**Beta:** {beta:.2f}" if beta else "**Beta:** N/A")
+        st.write(f"**Market Cap:** ${market_cap/1e9:.1f}B" if market_cap else "**Market Cap:** N/A")
+
+    with tab_tech:
+        # Technical Indicators
+        st.markdown("### 📈 Technical Indicators")
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.5, 0.25, 0.25], subplot_titles=("Price", "MACD", "RSI"))
+        fig.add_trace(go.Scatter(x=hist.index, y=close, name="Price"), row=1, col=1)
+        for ma_s, color in [(ma20, "#FFA726"), (ma50, "#42A5F5"), (ma200, "#EF5350")]:
+            fig.add_trace(go.Scatter(x=hist.index, y=ma_s, name=f"MA{ma_s.name}", line=dict(color=color)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=bb_u, name="BB+", line=dict(dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=bb_l, name="BB-", fill="tonexty", line=dict(dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=macd_l, name="MACD"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=macd_sig, name="Signal"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=hist.index, y=rsi_s, name="RSI"), row=3, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
+        fig.update_layout(height=600, showlegend=True)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab_signals:
+        # Entry Signals
+        close = hist["Close"]
+        rsi_v = rsi_s.iloc[-1]
+        ma50v = ma50.iloc[-1]
+        ma200v = ma200.iloc[-1]
+        price = close.iloc[-1]
+        h52 = close.tail(252).max()
+        l52 = close.tail(252).min()
+        pct_hi = (price - h52) / h52 * 100
+
+        score = 0.0
+        if rsi_v < 30: score += 2.5
+        elif rsi_v < 42: score += 1.2
+        elif rsi_v > 75: score -= 2.5
+        elif rsi_v > 65: score -= 1.0
+        if price > ma200v: score += 0.5
+        if price > ma50v: score += 0.5
+        if ma50v > ma200v: score += 0.5
+        if pct_hi < -30: score += 2.0
+        elif pct_hi < -15: score += 1.0
+        elif pct_hi > -5: score -= 0.5
+
+        if score >= 4: signal = "🟢 BUY"
+        elif score >= 2: signal = "🟡 ACCUMULATE"
+        elif score >= 0: signal = "🟠 WATCH"
+        else: signal = "🔴 HOLD"
+
+        st.markdown(f"### 🎯 Entry Signal: {signal}")
+        st.write(f"**Score:** {score:.1f}")
+        st.write(f"**RSI:** {rsi_v:.1f}")
+        st.write(f"**Distance to 52W High:** {pct_hi:+.1f}%")
+
+    with tab_compare:
+        # Performance Comparison
+        st.markdown("### 🔄 Performance Comparison")
+        benchmarks = ["^GSPC", "^IXIC", "^FCHI"]
+        fig = go.Figure()
+        for b in benchmarks:
+            b_data = load_data(b, period)
+            if not b_data.empty:
+                norm = b_data["Close"] / b_data["Close"].iloc[0] * 100
+                fig.add_trace(go.Scatter(x=b_data.index, y=norm, name=b))
+        norm = close / close.iloc[0] * 100
+        fig.add_trace(go.Scatter(x=hist.index, y=norm, name=ticker))
+        fig.update_layout(title="Normalized Performance", height=400)
+        st.plotly_chart(fig, use_container_width=True)
+
+# Footer
+st.markdown("---")
+st.caption("Data via yFinance • No financial advice • Refresh cache with the button in the sidebar")
